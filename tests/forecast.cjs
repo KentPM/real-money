@@ -1,0 +1,48 @@
+const { chromium } = require('playwright');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const http = require('node:http');
+(async()=>{
+const server=http.createServer((req,res)=>{res.setHeader('Content-Type','text/html');res.end(fs.readFileSync(require('node:path').join(__dirname,'../index.html')))}).listen(0,'127.0.0.1');
+let browser;
+try{
+browser=await chromium.launch({executablePath:process.env.CHROMIUM_PATH||'/usr/bin/chromium',headless:true,args:['--no-sandbox']});
+const page=await browser.newPage();const errors=[];page.on('pageerror',e=>errors.push(e.message));
+await page.clock.install({time:new Date('2026-11-11T12:00:00Z')});
+await page.goto(`http://127.0.0.1:${server.address().port}`);
+const entry=(id,name,amount,type,date,status='planned',extra={})=>({id,name,amount,type,date,status,...extra});
+const seed={balance:400,buffer:150,transactions:[entry('1','Paycheck',3000,'income','2026-11-12'),entry('2','Car payment',659,'expense','2026-11-13'),entry('3','Insurance',225,'expense','2026-11-15'),entry('4','Old paycheck',1000,'income','2026-11-12','cleared'),entry('5','Old bill',50,'expense','2026-11-13','cleared')],recurring:[],reconciliations:[{id:'old',date:'2026-11-10',balance:400}]};
+await page.evaluate(s=>{localStorage.setItem('real-money-v1',JSON.stringify(s));},seed);await page.reload();
+assert.deepEqual(await page.evaluate(()=>state),seed,'existing data loads intact');
+const days=await page.evaluate(()=>summary().days);
+for(const [date,balance] of [['2026-11-11',400],['2026-11-12',3400],['2026-11-13',2741],['2026-11-15',2516]])assert.equal(days.find(d=>d.date===date).value,balance);
+assert.equal(await page.evaluate(()=>summary().all.length),3,'cleared entries excluded');
+assert.equal(await page.evaluate(()=>summary().safe),250,'future income excluded from safe spending');
+await page.locator('[data-chart-date="2026-11-12"]').click();assert.match(await page.locator('#chartDetail').innerText(),/Scheduled income: \$3,000.00/);
+await page.locator('[data-chart-date="2026-11-13"]').click();assert.match(await page.locator('#chartDetail').innerText(),/Scheduled expenses: \$659.00/);
+assert.match(await page.locator('#chartDetail').innerText(),/1 scheduled item/);
+await page.evaluate(()=>{state.recurring=[{id:'pay',name:'Paycheck',amount:3000,type:'income',date:'2026-11-12',frequency:'biweekly'},{id:'car',name:'Car payment',amount:659,type:'expense',date:'2026-11-13',frequency:'monthly'}];render()});
+assert.equal(await page.evaluate(()=>events('2026-11-13').length),2,'manual entries replace matching recurring occurrences');
+assert.equal(await page.evaluate(()=>events('2026-12-13').filter(e=>e.source==='recurring').length),3,'later recurring occurrences remain');
+await page.evaluate(()=>{state.transactions[0].status='cleared';render()});
+assert.equal(await page.evaluate(()=>events('2026-11-12').length),0,'cleared manual income suppresses recurring occurrence');
+await page.evaluate(()=>{state.transactions[1].status='cleared';render()});
+assert.equal(await page.evaluate(()=>events('2026-11-13').length),0,'cleared manual expense suppresses recurring occurrence');
+await page.evaluate(()=>{state.transactions.push({id:'linked',name:'Renamed income',amount:3200,type:'income',date:'2026-11-12',status:'planned',recurringKey:'rec:pay:2026-11-12'});render()});
+assert.equal(await page.evaluate(()=>events('2026-11-12').filter(e=>e.type==='income').length),1,'explicit link replaces edited occurrence');
+await page.evaluate(()=>{state={balance:400,buffer:150,transactions:[],recurring:[{id:'a',name:'Rent',amount:700,type:'expense',date:'2026-11-12',frequency:'monthly'},{id:'b',name:'Salary',amount:3000,type:'income',date:'2026-11-25',frequency:'monthly'}],reconciliations:[]};render()});
+assert.equal(await page.evaluate(()=>summary().safe),-450);
+await page.locator('#horizon').selectOption('7');assert.equal(await page.evaluate(()=>summary().safe),-450,'safe spending independent of horizon');
+assert.equal(await page.locator('[data-chart-date="2026-11-12"]').getAttribute('class').then(c=>c.includes('low')),true);
+assert.match(await page.locator('#alert').innerText(),/below \$0/);
+await page.evaluate(()=>{state.transactions=[{id:'today',name:'Today bill',amount:20,type:'expense',date:today(),status:'planned'},{id:'future',name:'Future bill',amount:30,type:'expense',date:addDays(today(),1),status:'planned'}];state.recurring.push({id:'today-rec',name:'Today recurring',amount:10,type:'expense',date:today(),frequency:'weekly'});render()});
+page.on('dialog',d=>d.accept());await page.locator('[data-tab="settings"]').click();await page.locator('#reconcileBalance').fill('500');await page.locator('#reconcileNow').click();
+assert.equal(await page.evaluate(()=>state.transactions.find(t=>t.id==='today').status),'cleared');assert.equal(await page.evaluate(()=>state.transactions.find(t=>t.id==='future').status),'planned');assert.equal(await page.evaluate(()=>events(today()).length),0,'reconciliation prevents double counting');
+assert.equal(await page.evaluate(()=>state.reconciliations.length),1);
+await page.evaluate(()=>{state.transactions.push({id:'pending',name:'Pending',amount:5,type:'expense',date:today(),status:'planned'});render()});
+await page.locator('#reconcileClear').uncheck();await page.locator('#reconcileBalance').fill('490');await page.locator('#reconcileNow').click();assert.equal(await page.evaluate(()=>state.transactions.find(t=>t.id==='pending').status),'planned','unchecked reconcile retains pending');
+const downloadEvent=page.waitForEvent('download');await page.locator('#exportJson').click();const download=await downloadEvent;const backup=JSON.parse(fs.readFileSync(await download.path(),'utf8'));const original=await page.evaluate(()=>JSON.parse(JSON.stringify(state)));assert.deepEqual(backup.transactions,original.transactions);
+await page.evaluate(()=>{state.transactions=[];save()});await page.locator('#importJson').setInputFiles({name:'backup.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(backup))});await page.waitForFunction(()=>state.transactions.length>0);assert.deepEqual(await page.evaluate(()=>state),original,'backup restores transactions, recurring and reconciliation history');await page.reload();assert.deepEqual(await page.evaluate(()=>state),original,'restored data survives reload');
+assert.deepEqual(errors,[]);console.log('PASS: forecast example, cleared entries, recurring matching, explicit links, safe spending, chart details, negative warnings, reconcile options, JSON round trip and storage persistence');
+}finally{if(browser)await browser.close();server.close()}
+})().catch(e=>{console.error(e);process.exitCode=1});
