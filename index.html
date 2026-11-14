@@ -72,25 +72,40 @@ const expenses=items.filter(e=>e.type==='expense').reduce((sum,e)=>sum+Number(e.
 balance+=income-expenses;days.push({date,value:balance,income,expenses,count:items.length});
 }return days;
 }
-function safeToSpend(){
-const start=today();
-// Find the next income independently of the chart horizon, including future starts.
-const candidates=[...state.transactions.filter(t=>t.status!=='cleared'&&t.type==='income'&&t.date>=start).map(t=>t.date),...state.recurring.filter(r=>r.type==='income').flatMap(r=>occurrences(r,start,addDays(r.date>start?r.date:start,366)).map(e=>e.date))].sort();
-let nextIncome;
-for(const date of [...new Set(candidates)]){if(events(date).some(e=>e.type==='income'&&e.date===date)){nextIncome=date;break}}
-const until=nextIncome||addDays(start,60);
-const ledger=bucketLedger(),remaining={...ledger.balances};
-const expenses=events(until).filter(e=>e.type==='expense').reduce((sum,e)=>{
- const amount=Number(e.amount);
- if(e.source==='transaction'&&e.bucketId&&remaining[e.bucketId]!==undefined){
-  const covered=Math.min(remaining[e.bucketId],amount);
-  remaining[e.bucketId]=cents(remaining[e.bucketId]-covered);
-  return sum+amount-covered;
+// Project bucket reservations as of a future day without changing saved state.
+function projectedBucketBalances(date){
+ const balances={...bucketLedger(today()).balances};
+ if(date<=today())return balances;
+ const timeline=[];
+ for(const b of bucketItems())for(const o of occurrences(b,addDays(today(),1),date))timeline.push({date:o.date,kind:'refill',b});
+ for(const t of state.transactions)if(t.type==='expense'&&t.bucketId&&balances[t.bucketId]!==undefined&&t.status!=='cleared'&&t.date>today()&&t.date<=date)timeline.push({date:t.date,kind:'spend',t});
+ timeline.sort((a,b)=>a.date.localeCompare(b.date)||(a.kind==='refill'?-1:1));
+ for(const e of timeline){
+  if(e.kind==='refill')balances[e.b.id]=Math.max(0,cents(Number(e.b.amount)));
+  else balances[e.t.bucketId]=Math.max(0,cents(balances[e.t.bucketId]-Number(e.t.amount)));
  }
- return sum+amount;
-},0);
-const reserved=ledger.total;
-return {amount:(Number(state.balance)||0)-expenses-reserved-(Number(state.buffer)||0),nextIncome,until};
+ return balances;
+}
+function safeToSpendAt(date,openingBalance,bucketBalances){
+ // Same rules as the headline: exclude the next income, but include expenses
+ // on its date; bucket-funded expenses consume reservations before free cash.
+ const candidates=events(addDays(date,366)).filter(e=>e.type==='income'&&e.date>=date).map(e=>e.date).sort();
+ const nextIncome=candidates[0],until=nextIncome||addDays(date,60);
+ const remaining={...bucketBalances};
+ const obligations=events(until).filter(e=>e.type==='expense'&&e.date>=date).reduce((sum,e)=>{
+  const amount=Number(e.amount);
+  if(e.source==='transaction'&&e.bucketId&&remaining[e.bucketId]!==undefined){
+   const covered=Math.min(remaining[e.bucketId],amount);
+   remaining[e.bucketId]=cents(remaining[e.bucketId]-covered);
+   return sum+amount-covered;
+  }
+  return sum+amount;
+ },0);
+ const reserved=Object.values(bucketBalances).reduce((sum,v)=>sum+v,0);
+ return {amount:cents(openingBalance-obligations-reserved-(Number(state.buffer)||0)),nextIncome,until};
+}
+function safeToSpend(){
+ return safeToSpendAt(today(),Number(state.balance)||0,bucketLedger().balances);
 }
 function summary(){const end=addDays(today(),Number($('horizon').value));const all=events(end),days=dailyForecast(all,end),spending=safeToSpend();return {all,days,lowest:Math.min(Number(state.balance)||0,...days.map(d=>d.value)),safe:spending.amount,spending,end}}
 function render(){const s=summary();renderBuckets();renderCalendar();$('safe').textContent=money(s.safe);$('safe').className='big '+(s.safe<0?'negative':'positive');$('balanceDisplay').textContent=money(Number(state.balance)||0);$('lowDisplay').textContent=money(s.lowest);$('lowDisplay').className=s.lowest<0?'negative':'';$('safeDesc').textContent=s.spending.nextIncome?`Available now after expenses, budget bucket reserves, through ${s.spending.nextIncome} and your protected buffer. The next income is excluded; it increases future forecast balances when it arrives.`:'No upcoming income scheduled. Available now after the next 60 days of expenses and bucket reserves and your protected buffer; independent of the chart range.';$('alert').innerHTML=s.lowest<0?'<div class="warning">Forecast dips below $0. Review upcoming payments and their dates.</div>':'';let running=Number(state.balance)||0;let rows=[`<div class="row"><div><strong>Today</strong><div class="date">${today()}</div></div><strong>${money(running)}</strong></div>`];for(let e of s.all){running+=signedAmount(e);rows.push(`<div class="row"><div style="min-width:0"><strong>${esc(e.name)}</strong><div class="date">${e.date} · ${e.source==='recurring'?'Repeating':e.recurringKey?'One-time override':'Planned'}${e.source==='recurring'||e.recurringKey?` <button type="button" class="secondary" style="padding:4px 7px;margin-left:5px" data-occurrence="${esc(e.recurringKey||e.id)}">Edit once</button>`:''}</div></div><div class="right"><strong class="${signedAmount(e)>0?'positive':''}">${signedAmount(e)>0?'+':''}${money(signedAmount(e))}</strong><div class="date">Balance ${money(running)}</div></div></div>`)}$('forecast').innerHTML=rows.join('')||'<p>No upcoming transactions.</p>';
@@ -117,19 +132,15 @@ function renderCalendar(){
  const firstDay=new Date(c.year,c.month-1,1).getDay(),numDays=new Date(c.year,c.month,0).getDate();
  const dates=Array.from({length:numDays},(_,i)=>c.first.slice(0,8)+String(i+1).padStart(2,'0'));
  const dailyMap=Object.fromEntries(c.daily.map(d=>[d.date,d]));
- const bucketTopups=bucketProjection(c.end>=today()?c.end:today());
  const values=dates.map(date=>{const d=dailyMap[date];if(!d)return null;
  if(calendarMode==='forecast')return d.value;
  if(calendarMode==='expenses')return d.expenses;
  if(calendarMode==='income')return d.income;
- const pending=events(addDays(date,366)).filter(e=>e.date>date&&e.type==='income').map(e=>e.date).sort()[0];
- const through=pending||addDays(date,60);
- const future=events(through).filter(e=>e.date>date&&e.date<=through&&e.type==='expense');
- let reserve=c.currentReserves;
- for(const topup of bucketTopups)if(topup.date<=date)reserve+=topup.amount;
- const remaining={...bucketLedger().balances};
- const obligations=future.reduce((sum,e)=>{if(e.bucketId&&remaining[e.bucketId]!==undefined){const covered=Math.min(remaining[e.bucketId],Number(e.amount));remaining[e.bucketId]-=covered;return sum+Number(e.amount)-covered}return sum+Number(e.amount)},0);
- return d.value-reserve-Number(state.buffer||0)-obligations;
+ // Today's cell is exactly the headline safe-to-spend figure.
+ if(date===today())return safeToSpend().amount;
+ // Later cells start after that day's projected transactions have settled.
+ // The same safe-to-spend rules then evaluate obligations from tomorrow.
+ return safeToSpendAt(addDays(date,1),d.value,projectedBucketBalances(date)).amount;
  });
  const valid=values.filter(v=>v!==null),max=Math.max(1,...valid.map(v=>Math.max(0,v))),min=Math.min(0,...valid);
  function color(v){if(v===null)return '#e9eeec';if(calendarMode==='income')return v===0?'#edf1ef':v>max*.7?'#76bc9d':'#c2e5d4';if(calendarMode==='expenses')return v===0?'#edf1ef':v>max*.7?'#e6a298':'#f3d4c7';return v<0?'#df8f87':v<max*.2?'#f0d29b':v<max*.5?'#e7e8b7':'#b9dec8'}
