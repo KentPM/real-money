@@ -122,9 +122,9 @@ function renderCalendar(){
  if(calendarMode==='forecast')return d.value;
  if(calendarMode==='expenses')return d.expenses;
  if(calendarMode==='income')return d.income;
- const pending=c.all.filter(e=>e.date>=date&&e.type==='income').map(e=>e.date).sort()[0];
+ const pending=events(addDays(date,366)).filter(e=>e.date>date&&e.type==='income').map(e=>e.date).sort()[0];
  const through=pending||addDays(date,60);
- const future=c.all.filter(e=>e.date>=date&&e.date<=through&&e.type==='expense');
+ const future=events(through).filter(e=>e.date>date&&e.date<=through&&e.type==='expense');
  let reserve=c.currentReserves;
  for(const topup of bucketTopups)if(topup.date<=date)reserve+=topup.amount;
  const remaining={...bucketLedger().balances};
