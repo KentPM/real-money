@@ -1,4 +1,4 @@
-# Real Money v0.4 — GitHub Pages PWA
+# Real Money v0.5 — GitHub Pages PWA
 
 Static offline-first budgeting app. No server or build step.
 
