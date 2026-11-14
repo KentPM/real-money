@@ -33,7 +33,7 @@ function bucketLedger(end=today()){
  // are included even when cleared, since they still consumed a bucket allocation.
  const eventsList=[];
  for(const b of buckets)for(const o of occurrences(b,b.date,end))eventsList.push({date:o.date,kind:'refill',b});
- for(const t of state.transactions)if(t.bucketId&&balances[t.bucketId]!==undefined&&t.date<=end&&t.type==='expense')eventsList.push({date:t.date,kind:'spend',t});
+ for(const t of state.transactions)if(t.bucketId&&balances[t.bucketId]!==undefined&&t.date<=end&&t.type==='expense'&&t.status==='cleared')eventsList.push({date:t.date,kind:'spend',t});
  eventsList.sort((a,b)=>a.date.localeCompare(b.date)||(a.kind==='refill'?-1:1));
  let allocated=0,overflow=0;
  for(const e of eventsList){
@@ -75,10 +75,10 @@ balance+=income-expenses;days.push({date,value:balance,income,expenses,count:ite
 // Project bucket reservations as of a future day without changing saved state.
 function projectedBucketBalances(date){
  const balances={...bucketLedger(today()).balances};
- if(date<=today())return balances;
+ if(date<today())return balances;
  const timeline=[];
  for(const b of bucketItems())for(const o of occurrences(b,addDays(today(),1),date))timeline.push({date:o.date,kind:'refill',b});
- for(const t of state.transactions)if(t.type==='expense'&&t.bucketId&&balances[t.bucketId]!==undefined&&t.status!=='cleared'&&t.date>today()&&t.date<=date)timeline.push({date:t.date,kind:'spend',t});
+ for(const t of state.transactions)if(t.type==='expense'&&t.bucketId&&balances[t.bucketId]!==undefined&&t.status!=='cleared'&&t.date>=today()&&t.date<=date)timeline.push({date:t.date,kind:'spend',t});
  timeline.sort((a,b)=>a.date.localeCompare(b.date)||(a.kind==='refill'?-1:1));
  for(const e of timeline){
   if(e.kind==='refill')balances[e.b.id]=Math.max(0,cents(Number(e.b.amount)));
