@@ -79,7 +79,17 @@ const candidates=[...state.transactions.filter(t=>t.status!=='cleared'&&t.type==
 let nextIncome;
 for(const date of [...new Set(candidates)]){if(events(date).some(e=>e.type==='income'&&e.date===date)){nextIncome=date;break}}
 const until=nextIncome||addDays(start,60);
-const expenses=events(until).filter(e=>e.type==='expense').reduce((sum,e)=>sum+Number(e.amount),0);const reserved=bucketLedger().total;
+const ledger=bucketLedger(),remaining={...ledger.balances};
+const expenses=events(until).filter(e=>e.type==='expense').reduce((sum,e)=>{
+ const amount=Number(e.amount);
+ if(e.source==='transaction'&&e.bucketId&&remaining[e.bucketId]!==undefined){
+  const covered=Math.min(remaining[e.bucketId],amount);
+  remaining[e.bucketId]=cents(remaining[e.bucketId]-covered);
+  return sum+amount-covered;
+ }
+ return sum+amount;
+},0);
+const reserved=ledger.total;
 return {amount:(Number(state.balance)||0)-expenses-reserved-(Number(state.buffer)||0),nextIncome,until};
 }
 function summary(){const end=addDays(today(),Number($('horizon').value));const all=events(end),days=dailyForecast(all,end),spending=safeToSpend();return {all,days,lowest:Math.min(Number(state.balance)||0,...days.map(d=>d.value)),safe:spending.amount,spending,end}}
